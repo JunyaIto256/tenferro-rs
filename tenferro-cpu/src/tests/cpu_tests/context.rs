@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn cpu_context_try_from_env_prefers_tenferro_num_threads_over_rayon() {
+    let _lock = env_lock();
+    let prev_tenferro = std::env::var_os("TENFERRO_NUM_THREADS");
+    let prev_rayon = std::env::var_os("RAYON_NUM_THREADS");
+
+    // TENFERRO_NUM_THREADS=1 must win over RAYON_NUM_THREADS=8
+    // (futex deadlock fix: separating tenferro/faer parallelism from the
+    // application rayon pool).
+    std::env::set_var("TENFERRO_NUM_THREADS", "1");
+    std::env::set_var("RAYON_NUM_THREADS", "8");
+
+    let ctx = CpuContext::try_from_env().unwrap();
+    assert_eq!(ctx.num_threads(), 1);
+
+    // Restore previous env values.
+    match prev_tenferro {
+        Some(v) => std::env::set_var("TENFERRO_NUM_THREADS", v),
+        None => std::env::remove_var("TENFERRO_NUM_THREADS"),
+    }
+    match prev_rayon {
+        Some(v) => std::env::set_var("RAYON_NUM_THREADS", v),
+        None => std::env::remove_var("RAYON_NUM_THREADS"),
+    }
+}
+
+#[test]
 fn cpu_context_from_env_respects_rayon_num_threads() {
     with_rayon_num_threads(Some("3"), || {
         let ctx = CpuContext::from_env();

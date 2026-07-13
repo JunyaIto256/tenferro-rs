@@ -24,8 +24,8 @@ pub struct CpuContext {
 }
 
 impl CpuContext {
-    /// Create a CPU context from `RAYON_NUM_THREADS`, or fall back to the
-    /// process-visible CPU count.
+    /// Create a CPU context from `TENFERRO_NUM_THREADS` (preferred) or
+    /// `RAYON_NUM_THREADS`, falling back to the process-visible CPU count.
     ///
     /// # Examples
     ///
@@ -40,7 +40,15 @@ impl CpuContext {
             .unwrap_or_else(|_| Self::with_threads(super::affinity::available_parallelism()))
     }
 
-    /// Try to create a CPU context from `RAYON_NUM_THREADS`.
+    /// Try to create a CPU context from `TENFERRO_NUM_THREADS`, falling back
+    /// to `RAYON_NUM_THREADS` when the former is not set.
+    ///
+    /// `TENFERRO_NUM_THREADS` allows separating tenferro/faer gemm parallelism
+    /// from the application rayon pool.  Setting it to 1 prevents deadlocks
+    /// where a rayon worker holding `Mutex<CpuBackend>` spawns faer work into
+    /// the same rayon pool via `Par::rayon(…)` → circular wait.
+    /// See `~/qtt_runs/futex_hang_bt_38981_sepmpo_ns2mu2.txt` for the
+    /// full backtrace analysis.
     ///
     /// # Examples
     ///
@@ -52,26 +60,56 @@ impl CpuContext {
     /// assert!(ctx.num_threads() >= 1);
     /// ```
     pub fn try_from_env() -> Result<Self> {
-        match env::var("RAYON_NUM_THREADS") {
+        // TENFERRO_NUM_THREADS takes priority (futex deadlock fix).
+        match env::var("TENFERRO_NUM_THREADS") {
             Ok(value) => {
                 let num_threads = value.parse::<usize>().map_err(|err| Error::InvalidConfig {
                     op: "CpuContext::try_from_env",
-                    message: format!("invalid RAYON_NUM_THREADS value {value:?}: {err}"),
+                    message: format!("invalid TENFERRO_NUM_THREADS value {value:?}: {err}"),
                 })?;
                 Self::try_with_threads(num_threads).map_err(|err| match err {
                     Error::InvalidConfig { message, .. } => Error::InvalidConfig {
                         op: "CpuContext::try_from_env",
-                        message: format!("invalid RAYON_NUM_THREADS value {value:?}: {message}"),
+                        message: format!(
+                            "invalid TENFERRO_NUM_THREADS value {value:?}: {message}"
+                        ),
                     },
                     err => err,
                 })
             }
             Err(env::VarError::NotPresent) => {
-                Self::try_with_threads(super::affinity::available_parallelism())
+                // Fall back to RAYON_NUM_THREADS (traditional behaviour).
+                match env::var("RAYON_NUM_THREADS") {
+                    Ok(value) => {
+                        let num_threads =
+                            value.parse::<usize>().map_err(|err| Error::InvalidConfig {
+                                op: "CpuContext::try_from_env",
+                                message: format!(
+                                    "invalid RAYON_NUM_THREADS value {value:?}: {err}"
+                                ),
+                            })?;
+                        Self::try_with_threads(num_threads).map_err(|err| match err {
+                            Error::InvalidConfig { message, .. } => Error::InvalidConfig {
+                                op: "CpuContext::try_from_env",
+                                message: format!(
+                                    "invalid RAYON_NUM_THREADS value {value:?}: {message}"
+                                ),
+                            },
+                            err => err,
+                        })
+                    }
+                    Err(env::VarError::NotPresent) => {
+                        Self::try_with_threads(super::affinity::available_parallelism())
+                    }
+                    Err(err) => Err(Error::InvalidConfig {
+                        op: "CpuContext::try_from_env",
+                        message: format!("failed to read RAYON_NUM_THREADS: {err}"),
+                    }),
+                }
             }
             Err(err) => Err(Error::InvalidConfig {
                 op: "CpuContext::try_from_env",
-                message: format!("failed to read RAYON_NUM_THREADS: {err}"),
+                message: format!("failed to read TENFERRO_NUM_THREADS: {err}"),
             }),
         }
     }
